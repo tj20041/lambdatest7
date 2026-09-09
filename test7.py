@@ -2,63 +2,69 @@ import base64
 import json
 import logging
 import sys
-from typing import Any, Dict, List, Tuple
+import zlib
+from typing import Any, Dict
 
-logger = logging.getLogger("multipart_parser_lambda")
+logger = logging.getLogger("gzip_payload_handler")
 logger.setLevel(logging.INFO)
 stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
 logger.handlers = [stream_handler]
 
-class MultipartStreamDecoder:
-    def __init__(self, boundary: str):
-        self.boundary = boundary.encode("utf-8")
 
-    def parse_payload(self, raw_bytes: bytes) -> List[Dict[str, Any]]:
-        logger.info(f"Deconstructing multipart stream using boundary token: {self.boundary.decode('utf-8')}")
-        parts = raw_bytes.split(b"--" + self.boundary)
-        extracted_sections = []
+class CompressedPayloadDecoder:
 
-        for idx, part in enumerate(parts):
-            # Clean outer delimiters
-            cleaned = part.strip()
-            if not cleaned or cleaned == b"--":
-                continue
+    def __init__(self, max_payload_bytes: int = 10 * 1024 * 1024):
+        self.max_payload_bytes = max_payload_bytes
 
-            logger.info(f"Parsing multipart fragment #{idx} (length: {len(cleaned)} bytes)")
+    def decompress_and_decode(
+        self, raw_body: str, is_base64_encoded: bool
+    ) -> Dict[str, Any]:
+        logger.info(
+            f"Decompressing payload (isBase64Encoded={is_base64_encoded}, length={len(raw_body)})"
+        )
 
-            # FAILS HERE: The closing boundary delimiter '--' or malformed end markers 
-            # do not have '\r\n\r\n' separating headers from body.
-            # split() returns a list with only 1 element. Index [1] raises IndexError: list index out of range
-            header_section, body_section = cleaned.split(b"\r\n\r\n", 1)
-            
-            headers_str = header_section.decode("utf-8")
-            extracted_sections.append({
-                "headers": headers_str,
-                "data_size": len(body_section)
-            })
+        # FAILS HERE: The payload was compressed with zlib/gzip and base64-encoded by API Gateway.
+        # Instead of decoding base64 to binary bytes first, the handler passes the raw ASCII string/bytes
+        # directly into zlib.decompress().
+        # Raises: zlib.error: Error -3 while decompressing data: incorrect header check
+        decompressed_stream = zlib.decompress(raw_body.encode("utf-8"))
 
-        return extracted_sections
+        if len(decompressed_stream) > self.max_payload_bytes:
+            raise ValueError("Decompressed payload exceeds maximum size quota")
+
+        return json.loads(decompressed_stream.decode("utf-8"))
+
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    logger.info("Received binary multipart submission...")
+    logger.info("Received compressed request payload...")
 
-    boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
-    
-    # Multipart raw body with trailing boundary indicator
-    raw_multipart_payload = (
-        f"--{boundary}\r\n"
-        f"Content-Disposition: form-data; name=\"upload_file\"; filename=\"audit.csv\"\r\n"
-        f"Content-Type: text/csv\r\n\r\n"
-        f"user_id,action\r\n101,login\r\n102,logout\r\n"
-        f"--{boundary}--\r\n"  # Final boundary tag
-    ).encode("utf-8")
+    # Real payload: compressed JSON with zlib, then base64-encoded
+    payload_data = json.dumps(
+        {"transaction_id": "TXN_774921", "batch_items": [101, 102, 103]}
+    )
+    compressed_binary = zlib.compress(payload_data.encode("utf-8"))
+    b64_encoded_body = base64.b64encode(compressed_binary).decode("ascii")
 
-    decoder = MultipartStreamDecoder(boundary=boundary)
-    results = decoder.parse_payload(raw_multipart_payload)
+    # API Gateway proxy event representation
+    simulated_event = {
+        "headers": {
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+        },
+        "isBase64Encoded": True,
+        "body": b64_encoded_body,
+    }
 
-    logger.info(f"Extracted {len(results)} form sections")
-    return {"statusCode": 200, "sections_parsed": len(results)}
+    decoder = CompressedPayloadDecoder()
+    parsed_json = decoder.decompress_and_decode(
+        raw_body=simulated_event["body"],
+        is_base64_encoded=simulated_event.get("isBase64Encoded", False),
+    )
+
+    logger.info(f"Successfully unpacked payload: {parsed_json}")
+    return {"statusCode": 200, "data": parsed_json}
+
 
 if __name__ == "__main__":
     lambda_handler({}, None)
