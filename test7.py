@@ -1,70 +1,21 @@
-import base64
-import json
-import logging
-import sys
-import zlib
-from typing import Any, Dict
-
-logger = logging.getLogger("gzip_payload_handler")
-logger.setLevel(logging.INFO)
-stream_handler = logging.StreamHandler(sys.stdout)
-stream_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-logger.handlers = [stream_handler]
-
-
-class CompressedPayloadDecoder:
-
-    def __init__(self, max_payload_bytes: int = 10 * 1024 * 1024):
-        self.max_payload_bytes = max_payload_bytes
-
-    def decompress_and_decode(
-        self, raw_body: str, is_base64_encoded: bool
-    ) -> Dict[str, Any]:
-        logger.info(
-            f"Decompressing payload (isBase64Encoded={is_base64_encoded}, length={len(raw_body)})"
-        )
-
-        # FAILS HERE: The payload was compressed with zlib/gzip and base64-encoded by API Gateway.
-        # Instead of decoding base64 to binary bytes first, the handler passes the raw ASCII string/bytes
-        # directly into zlib.decompress().
-        # Raises: zlib.error: Error -3 while decompressing data: incorrect header check
-        decompressed_stream = zlib.decompress(raw_body.encode("utf-8"))
-
-        if len(decompressed_stream) > self.max_payload_bytes:
-            raise ValueError("Decompressed payload exceeds maximum size quota")
-
-        return json.loads(decompressed_stream.decode("utf-8"))
-
-
-def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    logger.info("Received compressed request payload...")
-
-    # Real payload: compressed JSON with zlib, then base64-encoded
-    payload_data = json.dumps(
-        {"transaction_id": "TXN_774921", "batch_items": [101, 102, 103]}
-    )
-    compressed_binary = zlib.compress(payload_data.encode("utf-8"))
-    b64_encoded_body = base64.b64encode(compressed_binary).decode("ascii")
-
-    # API Gateway proxy event representation
-    simulated_event = {
-        "headers": {
-            "Content-Type": "application/json",
-            "Content-Encoding": "gzip",
-        },
-        "isBase64Encoded": True,
-        "body": b64_encoded_body,
+{
+  "fixed_files": [
+    {
+      "file_path": "test7.py",
+      "fixed_code": "import base64\nimport binascii\nimport json\nimport logging\nimport sys\nimport zlib\nfrom typing import Any, Dict\n\nlogger = logging.getLogger(\"gzip_payload_handler\")\nlogger.setLevel(logging.INFO)\nstream_handler = logging.StreamHandler(sys.stdout)\nstream_handler.setFormatter(logging.Formatter(\"[%(levelname)s] %(message)s\"))\nlogger.handlers = [stream_handler]\n\n\nclass CompressedPayloadDecoder:\n\n    def __init__(self, max_payload_bytes: int = 10 * 1024 * 1024):\n        self.max_payload_bytes = max_payload_bytes\n\n    def decompress_and_decode(\n        self, raw_body: str, is_base64_encoded: bool\n    ) -> Dict[str, Any]:\n        logger.info(\n            f\"Decompressing payload (isBase64Encoded={is_base64_encoded}, length={len(raw_body)})\"\n        )\n\n        if is_base64_encoded:\n            try:\n                compressed_bytes = base64.b64decode(raw_body)\n            except binascii.Error as exc:\n                raise ValueError(\n                    f\"Payload is marked as base64-encoded but could not be decoded: {exc}\"\n                ) from exc\n        else:\n            compressed_bytes = raw_body.encode(\"utf-8\")\n\n        try:\n            decompressed_stream = zlib.decompress(compressed_bytes)\n        except zlib.error as exc:\n            raise ValueError(\n                f\"Failed to decompress payload (is_base64_encoded={is_base64_encoded}): {exc}\"\n            ) from exc\n\n        if len(decompressed_stream) > self.max_payload_bytes:\n            raise ValueError(\"Decompressed payload exceeds maximum size quota\")\n\n        return json.loads(decompressed_stream.decode(\"utf-8\"))\n\n\ndef lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:\n    logger.info(\"Received compressed request payload...\")\n\n    # Real payload: compressed JSON with zlib, then base64-encoded\n    payload_data = json.dumps(\n        {\"transaction_id\": \"TXN_774921\", \"batch_items\": [101, 102, 103]}\n    )\n    compressed_binary = zlib.compress(payload_data.encode(\"utf-8\"))\n    b64_encoded_body = base64.b64encode(compressed_binary).decode(\"ascii\")\n\n    # API Gateway proxy event representation\n    simulated_event = {\n        \"headers\": {\n            \"Content-Type\": \"application/json\",\n            \"Content-Encoding\": \"gzip\",\n        },\n        \"isBase64Encoded\": True,\n        \"body\": b64_encoded_body,\n    }\n\n    # Guard: warn if Content-Encoding suggests compression but isBase64Encoded is False\n    content_encoding = (\n        simulated_event.get(\"headers\", {}).get(\"Content-Encoding\", \"\").lower()\n    )\n    is_base64 = simulated_event.get(\"isBase64Encoded\", False)\n    if content_encoding in (\"gzip\", \"deflate\") and not is_base64:\n        logger.warning(\n            \"Content-Encoding indicates compressed payload but isBase64Encoded is False; \"\n            \"decompression may fail if the body has not been binary-safe transported.\"\n        )\n\n    decoder = CompressedPayloadDecoder()\n    try:\n        parsed_json = decoder.decompress_and_decode(\n            raw_body=simulated_event[\"body\"],\n            is_base64_encoded=is_base64,\n        )\n    except ValueError as exc:\n        logger.error(f\"Failed to decode compressed payload: {exc}\", exc_info=True)\n        return {\n            \"statusCode\": 400,\n            \"body\": json.dumps({\"error\": str(exc)}),\n        }\n\n    logger.info(f\"Successfully unpacked payload: {parsed_json}\")\n    return {\"statusCode\": 200, \"data": parsed_json}\n\n\nif __name__ == \"__main__\":\n    lambda_handler({}, None)\n",
+      "changes_made": [
+        "Added 'import binascii' to support catching binascii.Error from base64.b64decode().",
+        "Replaced the unconditional 'zlib.decompress(raw_body.encode(\"utf-8\"))' with a conditional branch: when is_base64_encoded is True, base64.b64decode(raw_body) is called first to recover the compressed binary bytes; when False, raw_body.encode('utf-8') is used directly.",
+        "Added a try/except binascii.Error around base64.b64decode() that re-raises a descriptive ValueError when the payload is marked base64-encoded but cannot be decoded, replacing the cryptic zlib header error with an actionable message.",
+        "Wrapped zlib.decompress() in a try/except zlib.error that re-raises as a descriptive ValueError, providing clearer diagnostics for any residual decompression failures.",
+        "Added a Content-Encoding / isBase64Encoded consistency guard in lambda_handler() that logs a warning when the header signals compression but isBase64Encoded is False, catching future misconfigured payloads early.",
+        "Wrapped the decoder.decompress_and_decode() call in lambda_handler() in a try/except ValueError block that returns a structured HTTP 400 JSON error response instead of letting the exception propagate and crash the Lambda invocation."
+      ]
     }
-
-    decoder = CompressedPayloadDecoder()
-    parsed_json = decoder.decompress_and_decode(
-        raw_body=simulated_event["body"],
-        is_base64_encoded=simulated_event.get("isBase64Encoded", False),
-    )
-
-    logger.info(f"Successfully unpacked payload: {parsed_json}")
-    return {"statusCode": 200, "data": parsed_json}
-
-
-if __name__ == "__main__":
-    lambda_handler({}, None)
+  ],
+  "explanation": "The root cause was a single missing step in the decompression pipeline inside CompressedPayloadDecoder.decompress_and_decode(). The encoding chain applied to the payload is: JSON string → zlib.compress() → base64.b64encode() → ASCII string stored in the event body. The correct reversal must be: base64.b64decode() → zlib.decompress() → JSON string. The original code skipped the first reversal step entirely, calling zlib.decompress(raw_body.encode('utf-8')) which handed zlib the raw base64 ASCII bytes (e.g. b'eJy...') rather than the compressed binary. zlib immediately rejected them with 'Error -3: incorrect header check' because a valid zlib stream must begin with the magic bytes 0x78 0x9C (or similar), not base64 characters. The is_base64_encoded flag was accepted by the method signature and passed correctly at every call-site, but was never read inside the method body, so the guard was entirely inoperative and every invocation failed at 100% rate.\n\nThe fix introduces a conditional decode branch: when is_base64_encoded is True (the normal API Gateway path), base64.b64decode(raw_body) is called first to recover the compressed binary, which is then passed to zlib.decompress(); when False, raw_body.encode('utf-8') is used unchanged. A try/except binascii.Error around the base64 step converts malformed-base64 failures into a descriptive ValueError rather than a cryptic low-level exception. A try/except zlib.error around the decompress step similarly produces a clear message for any residual decompression failure. In lambda_handler(), the decoder call is wrapped in try/except ValueError so failures produce a structured HTTP 400 JSON response rather than an unhandled exception crash. A Content-Encoding vs isBase64Encoded consistency check was also added to detect misconfigured future payloads early. The import binascii statement was added to support the binascii.Error catch; the existing import base64 at the top of the file is preserved and is now load-bearing inside decompress_and_decode() as well as in the lambda_handler() test setup.",
+  "confidence_score": 0.97,
+  "source_branch": "fix/base64-decode-before-zlib-decompress",
+  "commit_message": "fix: decode base64 before zlib.decompress in CompressedPayloadDecoder",
+  "title": "Fix: Base64 decode step missing before zlib decompression causing 100% Lambda invocation failure"
+}
